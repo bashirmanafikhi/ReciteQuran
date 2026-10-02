@@ -18,6 +18,8 @@
 - Keep repository a fork: original `lib/`, `assets/`, `bin/`, `pubspec.yaml`, `README.md`, `LICENSE` remain; only `example/` and Flutter scaffolding are deleted.
 - Every task ends with `npx tsc --noEmit` + `npx jest` green (from Task 2 on) and a git commit.
 - Environment: Windows, Node v26, Java 17. Flutter/Dart is NOT installed (install only at Task 15).
+- **Verification philosophy (from spec):** unit tests verify individual ports; A/B tests against the original Dart implementation verify behavioral equivalence. On mismatch: (1) inspect the original Dart implementation, (2) identify the exact behavior causing the difference, (3) fix the RN implementation, (4) rerun the comparison. Never solve mismatches by changing thresholds, the model, or inventing new heuristics. Do not claim 100% equivalence without A/B testing.
+- **End consumer:** the library must integrate into the Mutqen React Native app through a small API (bears on Task 10 API surface and Task 13 docs).
 
 ---
 
@@ -373,6 +375,8 @@ test('copyWith keeps other fields', () =>
   - Methods: `initialize(modelPath?: string): Promise<{ok: boolean; error?: string}>` (extract/download model + tokens to files dir), `prefetchModel(onProgress?: (pct:number)=>void): Promise<string>`, `start(): void` (mic + inference), `stop(): Promise<void>`, `resetBuffer(): void`, `feedAudioBase64(b64: string, isFinal: boolean): boolean` (offline/test path), `processWav(path: string): Promise<void>` (debug: emits results for a WAV file — verification aid)
   - Events: `ReciteQuranTokenResult` → `{ text: string; tokens: string[]; timestamps: number[]; isFinal: boolean; startTime: number; streamEpoch: number }`
 
+**Gate (from spec): do NOT begin implementation until the exact sherpa-onnx Android API/version used by the original Dart package has been identified. Inspect `pubspec.lock` (Dart package `sherpa_onnx` 1.13.6) and its changelog/source to determine the corresponding native sherpa-onnx version; pick the matching Android AAR from Maven Central. Do not guess the API — document the chosen version and any provider deviation.**
+
 **Spec (must match exactly):**
 - Recognizer: `OnlineRecognizer` with `feat(sampleRate=16000, featureDim=80)`, `zipformer2Ctc(model=…)`, `tokens=…`, `numThreads=2`, `modelType='zipformer2_ctc'`, `provider='xnnpack'` on Android (fallback `'cpu'` on init failure, mirroring marker logic `sherpa_engine_io.dart:302-360` simplified to try/catch), `enableEndpoint=true`, rule1=10.0, rule2=4.0, rule3=9999.0 (`sherpa_engine_io.dart:274-296`).
 - Stream lifecycle: create stream → accept priming **7,680 zero floats** → `while(isReady) decode` (`sherpa_engine_io.dart:358-366`); per audio buffer `acceptWaveform(16000, samples)` → decode loop → `getResult` → emit unless endpoint detected; `isFinal` → `inputFinished()` + drain + final emit; `resetBuffer` → `recognizer.reset(stream)` + re-prime (L452-460); bump `streamEpoch` on reset (both sides, L217-232).
@@ -467,6 +471,7 @@ test('copyWith keeps other fields', () =>
 
 - [ ] **Step 1: Obtain fixtures** (ask user for WAVs; fallback: record on Android device via the module's `processWav`/mic and pull file).
 - [ ] **Step 2: Write `compare.mjs`** — aligns token streams (exact string match, timestamps tolerance = 0.08 s), then event lists (exact wordId/isRed/score ε=1e-6/tajweedErrors deep-equal); prints PASS/FAIL summary.
+- **Tolerance policy (from spec):** exact equality where appropriate (wordId, isRed, error type, rule type, token strings). For timestamps: first investigate exact differences; only adopt a documented tolerance (e.g. 80 ms = one encoder frame) when native floating-point/runtime differences are demonstrated and justified. Scores: very small ε. Do not loosen tolerances to make tests pass.
 - [ ] **Step 3: Run both harnesses on each fixture, then compare.**
 - [ ] **Step 4: Iterate** — any mismatch → investigate original Dart source, fix TS/Kotlin side, re-run. NO new heuristics, NO threshold changes. Record each fix in its own commit (`fix(ts): …` mirroring `file:line` behavior).
 - [ ] **Step 5: Final commit** — `test(verification): A/B fixtures pass against original Dart engine`
@@ -480,6 +485,20 @@ test('copyWith keeps other fields', () =>
 - Commit: `feat(ts): port ayah voice search (optional feature)`
 
 ---
+
+## Definition of Done (from spec)
+
+The port is complete only when:
+
+- [ ] Original Dart engine (`lib/`) remains intact and unmodified.
+- [ ] React Native TypeScript engine is implemented; Android native sherpa-onnx integration works.
+- [ ] Exact original model (`zipformer_p_arabic_v3.int8.onnx`) and exact Quran data used.
+- [ ] No Whisper / cloud ASR; no thresholds or algorithms changed merely to improve comparison.
+- [ ] Expo development build works (`npx expo prebuild`, RECORD_AUDIO granted); Android build succeeds.
+- [ ] Core TypeScript tests pass.
+- [ ] Same WAV recordings processed by both implementations; token streams, word matching, skipped words, sequencing, and Tajweed results compared (Tasks 14–16).
+- [ ] Any intentional platform differences documented.
+- [ ] Library integrates into Mutqen through a small React Native API.
 
 ## Self-Review
 
