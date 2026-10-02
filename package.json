@@ -1,0 +1,21 @@
+{
+  "name": "react-native-recite-quran",
+  "version": "0.1.0",
+  "description": "On-device Quran recitation tracking (Zipformer2-CTC + DTW + Tajweed) for React Native / Expo (Android)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "android", "plugin", "app.plugin.ts", "assets/model/tokens.txt"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "jest --passWithNoTests"
+  },
+  "peerDependencies": { "react": "*", "react-native": "*" },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.0",
+    "@types/jest": "^29.5.0",
+    "@types/react": "*"
+  }
+}
