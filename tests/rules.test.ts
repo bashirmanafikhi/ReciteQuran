@@ -1,5 +1,5 @@
 // tests/rules.test.ts — port verification for lib/tracking/tajweed/tajweed_rules.dart
-import { TajweedDurationStatus } from '../src/types';
+import { TajweedDurationStatus, WordTajweedRule } from '../src/types';
 import {
   TajweedTimingConfig,
   LangName,
@@ -14,6 +14,8 @@ import {
   LeenMaddRule,
   MushaddadGhunnahRule,
   ShaddahRule,
+  wordTajweedRuleToMap,
+  wordTajweedRuleFromMap,
 } from '../src/tajweed/rules';
 
 const H = 0.20; // TajweedTimingConfig.harakahBaseSeconds
@@ -192,5 +194,84 @@ describe('toRuleMap → ReciterErrorRuleMap (error_explainer.dart:109-117)', () 
     expect(new ShaddahRule().toRuleMap()).toEqual({
       type: 'ShaddahRule', nameAr: 'الشدة', nameEn: 'Shaddah', goldenLen: 1,
     });
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// WordTajweedRule map form (quran_data.dart:23-35) — the live serialize pair used
+// by the alignment worker protocol (phoneme_alignment_isolate_protocol.dart:114-116
+// on the main side, :22-26 on the worker side).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+describe('wordTajweedRuleToMap (quran_data.dart:23-28)', () => {
+  test('emits exactly the four wire keys, in Dart order, and no `type`', () => {
+    const rule: WordTajweedRule = {
+      ruleId: 6, nameAr: 'المد اللازم', nameEn: 'Lazim Madd', goldenLen: 6,
+    };
+    const map = wordTajweedRuleToMap(rule);
+    expect(Object.keys(map)).toEqual(['ruleId', 'nameAr', 'nameEn', 'goldenLen']);
+    expect(map).toEqual(rule);
+    expect(map).not.toHaveProperty('type');
+  });
+
+  test('keeps ruleId 0 / goldenLen 0 as real values (no truthiness coercion)', () => {
+    expect(wordTajweedRuleToMap({ ruleId: 0, nameAr: '', nameEn: '', goldenLen: 0 })).toEqual({
+      ruleId: 0, nameAr: '', nameEn: '', goldenLen: 0,
+    });
+  });
+});
+
+describe('wordTajweedRuleFromMap (quran_data.dart:30-35)', () => {
+  test('applies the Dart defaults for missing and null fields', () => {
+    const expected: WordTajweedRule = { ruleId: 0, nameAr: '', nameEn: '', goldenLen: 0 };
+    expect(wordTajweedRuleFromMap({})).toEqual(expected);
+    // Dart `map['k'] as int? ?? default` also swallows an explicit null.
+    expect(wordTajweedRuleFromMap({ ruleId: null, nameAr: null, nameEn: null, goldenLen: null })).toEqual(expected);
+    expect(wordTajweedRuleFromMap({ ruleId: 9, nameEn: 'Shaddah' })).toEqual({
+      ruleId: 9, nameAr: '', nameEn: 'Shaddah', goldenLen: 0,
+    });
+  });
+
+  test('goldenLen is read as a num, so fractional Harakat survive', () => {
+    expect(wordTajweedRuleFromMap({ ruleId: 1, nameAr: 'a', nameEn: 'b', goldenLen: 1.5 }).goldenLen).toBe(1.5);
+    expect(wordTajweedRuleFromMap({ ruleId: 1, nameAr: 'a', nameEn: 'b', goldenLen: 2 }).goldenLen).toBe(2);
+  });
+});
+
+describe('wordTajweedRule round-trip (quran_data.dart:23-35)', () => {
+  const rules: WordTajweedRule[] = [
+    { ruleId: 1, nameAr: 'المد الطبيعي', nameEn: 'Natural Madd', goldenLen: 2 },
+    { ruleId: 3, nameAr: 'المد المتصل', nameEn: 'Connected Madd', goldenLen: 4 },
+    { ruleId: 6, nameAr: 'المد اللازم', nameEn: 'Lazim Madd', goldenLen: 6 },
+    { ruleId: 9, nameAr: 'الشدة', nameEn: 'Shaddah', goldenLen: 1 },
+    { ruleId: 10, nameAr: 'النون المشددة', nameEn: 'Mushaddad Noon', goldenLen: 2 },
+    { ruleId: 10, nameAr: 'الميم المشددة', nameEn: 'Mushaddad Meem', goldenLen: 2 },
+    { ruleId: 1, nameAr: 'x', nameEn: 'y', goldenLen: 1.5 },
+    { ruleId: 0, nameAr: '', nameEn: '', goldenLen: 0 },
+  ];
+
+  test('serialize → deserialize is structurally identical for every rule', () => {
+    for (const rule of rules) {
+      expect(wordTajweedRuleFromMap(wordTajweedRuleToMap(rule))).toEqual(rule);
+    }
+  });
+
+  test('survives JSON transport (the isolate boundary) unchanged', () => {
+    // Protocol shape: List<List<WordTajweedRule>> → List<List<Map>> → worker.
+    const wordRules = [rules.slice(0, 3), [], rules.slice(3)];
+    const wire = JSON.parse(
+      JSON.stringify(wordRules.map((list) => list.map(wordTajweedRuleToMap))),
+    ) as Record<string, any>[][];
+    const back = wire.map((list) => list.map(wordTajweedRuleFromMap));
+    expect(back).toEqual(wordRules);
+    expect(back.every((list) => list.every((r) => typeof r.goldenLen === 'number'))).toBe(true);
+  });
+
+  test('round-trip preserves the numeric field types and field order', () => {
+    const frac = wordTajweedRuleFromMap(wordTajweedRuleToMap(rules[6]));
+    expect(typeof frac.ruleId).toBe('number');
+    expect(typeof frac.goldenLen).toBe('number');
+    expect(Number.isInteger(frac.goldenLen)).toBe(false);
+    expect(Object.keys(frac)).toEqual(['ruleId', 'nameAr', 'nameEn', 'goldenLen']);
   });
 });

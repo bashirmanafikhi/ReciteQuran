@@ -78,9 +78,12 @@ const HIZB_SAJDAH_REGEX = /[۞۩]/g;
 // SECTION 1: WordTajweedRule (quran_data.dart:10-36)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// WordTajweedRule itself lives in src/types.ts (shared with the tajweed layer) so
-// that a rule parsed here is assignable to a TajweedRule produced by src/tajweed.
-// Only the construction helpers that quran_data.dart expressed as literals are kept.
+// The WordTajweedRule record itself lives in src/types.ts (Task 3) so a rule parsed
+// here is assignable to the tajweed layer without a second declaration; rules are
+// built as object literals below. Its live map form — Dart toMap()/fromMap()
+// (quran_data.dart:23-35), the serialize pair of the alignment worker protocol at
+// phoneme_alignment_isolate_protocol.dart:114-116 / :22-26 — is ported as
+// wordTajweedRuleToMap / wordTajweedRuleFromMap in src/tajweed/rules.ts.
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 2: QuranVerse (quran_data.dart:38-219)

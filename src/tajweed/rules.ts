@@ -7,7 +7,7 @@
 // Dart lib/ is read-only source of truth; class names are frozen because
 // ReciterError serialization uses `runtimeType.toString()` (error_explainer.dart:109).
 
-import { ReciterErrorRuleMap, TajweedDurationStatus } from '../types';
+import { ReciterErrorRuleMap, TajweedDurationStatus, WordTajweedRule } from '../types';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SECTION 1: TAJWEED TIMING CONFIGURATION (tajweed_rules.dart:16-40)
@@ -180,6 +180,46 @@ export class LeenMaddRule extends MaddRule {
   constructor() {
     super({ name: new LangName({ ar: 'مد اللين', en: 'Leen Madd' }), goldenLen: 4 });
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SECTION 3b: WORD RULE MAP FORM (quran_data.dart:23-35)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// WordTajweedRule is the per-word data record parsed in src/data/quranData.ts (it
+// lives in src/types.ts so both layers share one shape). It is NOT a TajweedRule —
+// it carries no `type` and no behaviour — so its map form is distinct from
+// TajweedRule.toRuleMap() above (`ReciterErrorRuleMap`, which adds `type`).
+// These two helpers are the live serialize/deserialize pair for the alignment
+// worker protocol: SetSurahReferenceCommand.toMap() emits them
+// (phoneme_alignment_isolate_protocol.dart:114-116) and IsolateCommand.fromMap()
+// consumes them on the worker side (phoneme_alignment_isolate_protocol.dart:22-26),
+// reached from recite_quran.dart:129-142 via phoneme_alignment_isolate_io.dart:118.
+
+/** Dart WordTajweedRule.toMap (quran_data.dart:23-28). Key order is preserved. */
+export function wordTajweedRuleToMap(rule: WordTajweedRule): Record<string, unknown> {
+  return {
+    ruleId: rule.ruleId,
+    nameAr: rule.nameAr,
+    nameEn: rule.nameEn,
+    goldenLen: rule.goldenLen,
+  };
+}
+
+/**
+ * Dart `factory WordTajweedRule.fromMap(Map)` (quran_data.dart:30-35). A missing or
+ * null value falls back to the Dart defaults (0 / '' / '' / 0); `goldenLen` is read
+ * as a Dart `num`, so a fractional Harakat count survives the round-trip.
+ * Dart's `as int?` / `as String?` casts throw on a wrong-typed value — the TypeScript
+ * casts are erased, so a wrong-typed value flows through instead of throwing.
+ */
+export function wordTajweedRuleFromMap(map: Record<string, any>): WordTajweedRule {
+  return {
+    ruleId: (map['ruleId'] ?? 0) as number,
+    nameAr: (map['nameAr'] ?? '') as string,
+    nameEn: (map['nameEn'] ?? '') as string,
+    goldenLen: (map['goldenLen'] ?? 0) as number,
+  };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
