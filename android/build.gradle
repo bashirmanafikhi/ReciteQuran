@@ -1,0 +1,98 @@
+// android/build.gradle — react-native-recite-quran
+//
+// ─── sherpa-onnx dependency (Task 11 gate; full evidence in task-11-report.md) ───
+//
+//   Dart dependency ...... sherpa_onnx 1.13.6 (pubspec.lock)
+//   Native version ....... sherpa-onnx v1.13.6 — the Dart Android packages are stamped
+//                          with the *same* string as the native project, upstream
+//                          new-release.sh writes CMakeLists.txt's SHERPA_ONNX_VERSION
+//                          into flutter/sherpa_onnx_android_arm64/pubspec.yaml.
+//                          Tag v1.13.6 has set(SHERPA_ONNX_VERSION "1.13.6").
+//   Maven Central ........ NO sherpa-onnx artifact exists
+//                          (search.maven.org "g:com.k2fsa.sherpa" -> numFound=0).
+//                          → provider deviation, see report §2.
+//   Provider used ........ JitPack, the coordinate the project's own jitpack.yml
+//                          (tag v1.13.6) installs the official release AAR under:
+//                          com.github.k2-fsa.sherpa-onnx:sherpa-onnx:1.13.6 (packaging=aar)
+//   Byte-identical ....... sha256 0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698
+//                          for both the JitPack artifact and
+//                          https://github.com/k2-fsa/sherpa-onnx/releases/download/v1.13.6/sherpa-onnx-1.13.6.aar
+//
+// The AAR is the *shared* onnxruntime build (jni/<abi>/libonnxruntime.so + libsherpa-onnx-jni.so),
+// which is exactly what the Dart/Flutter build linked against
+// (build-android-arm64-v8a.sh defaults BUILD_SHARED_LIBS=ON, onnxruntime 1.27.1), so the
+// decoded output stays comparable with the original app.
+
+buildscript {
+    // Only required when this module is opened standalone. When it is consumed as an
+    // autolinked React Native library the host application already supplies both plugins.
+    if (project == rootProject) {
+        repositories {
+            google()
+            mavenCentral()
+        }
+        dependencies {
+            classpath "com.android.tools.build:gradle:8.1.4"
+            classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.24"
+        }
+    }
+}
+
+apply plugin: "com.android.library"
+apply plugin: "org.jetbrains.kotlin.android"
+
+def safeExtGet(prop, fallback) {
+    rootProject.ext.has(prop) ? rootProject.ext.get(prop) : fallback
+}
+
+// assets/ of the published npm package (package.json "files" ships assets/model/tokens.txt).
+// Exposed through the AAR so ReciteQuranModule can extract it with AssetManager.
+def npmAssetsDir = file("$projectDir/../assets")
+
+android {
+    // AGP 7.3+ prefers `namespace`; keeping `package` out of the manifest keeps both
+    // old and new AGP happy (AGP 8 rejects `package` in AndroidManifest.xml).
+    if (project.android.hasProperty("namespace")) {
+        namespace "com.recitequran"
+    }
+
+    compileSdkVersion safeExtGet("compileSdkVersion", 34)
+
+    defaultConfig {
+        // sherpa-onnx 1.13.6's own AAR declares <uses-sdk android:minSdkVersion="21" />
+        // and is built with SHERPA_ONNX_ANDROID_PLATFORM=android-21.
+        minSdkVersion safeExtGet("minSdkVersion", 21)
+        targetSdkVersion safeExtGet("targetSdkVersion", 34)
+        consumerProguardFiles "proguard-rules.pro"
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    kotlinOptions {
+        jvmTarget = "1.8"
+    }
+
+    sourceSets {
+        main {
+            if (npmAssetsDir.exists()) {
+                assets.srcDirs += npmAssetsDir
+            }
+        }
+    }
+}
+
+repositories {
+    google()
+    mavenCentral()
+    // Hosts using settings.gradle dependencyResolutionManagement with
+    // RepositoriesMode.FAIL_ON_PROJECT_REPOS must add jitpack.io there as well.
+    maven { url = uri("https://jitpack.io") }
+}
+
+dependencies {
+    implementation "com.facebook.react:react-android"
+    implementation "com.github.k2-fsa.sherpa-onnx:sherpa-onnx:1.13.6"
+}
