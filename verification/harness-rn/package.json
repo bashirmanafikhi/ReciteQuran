@@ -1,0 +1,9 @@
+{
+  "name": "verification-harness-rn",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "sherpa-onnx": "^1.10.37"
+  }
+}
