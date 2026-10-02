@@ -255,7 +255,22 @@ export class ReciteQuran {
 
   // ── 2. Audio & Tracking Control ──
 
-  /** Starts the microphone and the recognizer feeding this session. */
+  /**
+   * Starts the microphone and the recognizer feeding this session.
+   *
+   * Resolving does **not** mean capture is live. `AsrTransport.start()` is
+   * `void` by contract, so the promise covers only the hand-off. With the native
+   * transport the recorder is not open yet at that point: permission acquisition
+   * and any still-in-flight `initialize()` are awaited *inside* the transport
+   * (`_beginStart`), and `isStarted` flips optimistically.
+   *
+   * Hosts that need capture-live certainty should pre-acquire with
+   * `transport.requestMicrophonePermission()` during start-up (so the system
+   * prompt does not land mid-recitation) and `await transport.initialize()`,
+   * then subscribe to `transport.onError` for anything that still fails after
+   * this call — a declined permission, an `E_NOT_INITIALIZED` race, a
+   * `ReciteQuranError` event from the bridge.
+   */
   async start(): Promise<void> {
     if (this._isDisposed) {
       throw new Error('Cannot start a disposed ReciteQuran session.');
@@ -394,13 +409,36 @@ export class ReciteQuran {
     this._guard(() => this._sequencer.updateConfig(newConfig));
   }
 
+  /** Requirement (e): the last `streamEpoch` a token-bearing result carried. */
+  private _lastStreamEpoch: number | null = null;
+
+  /**
+   * Requirement (e): an epoch that differs from the previous result's marks the
+   * boundary the native recognizer opens when `resetBuffer()` re-bases it, which
+   * is what `syncStream(isNewSegment)` needs to drop the stale
+   * `currentSegmentAsrText`/`trimmedOffset` (sequencer.ts:170-177).
+   *
+   * An absent or non-finite epoch is **no signal**, never a bump: a Jest double
+   * or any non-native transport that omits the field keeps the Dart behaviour
+   * (`isNewSegment: false`). The first epoch ever seen is a first result, not a
+   * change — the same rule as `SegmentChangeEvent.previousStreamEpoch === null`.
+   */
+  private _isNewSegment(streamEpoch: number | undefined): boolean {
+    if (typeof streamEpoch !== 'number' || !Number.isFinite(streamEpoch)) return false;
+    const previous = this._lastStreamEpoch;
+    this._lastStreamEpoch = streamEpoch;
+    return previous !== null && previous !== streamEpoch;
+  }
+
   // ── 5. Internal Message Pump ──
 
   /**
    * recite_quran.dart:182-195, with the per-character duration expansion of
-   * highlighting_controller.dart:612-619 in place of the facade's token-level one.
-   * `result.text` is surfaced before any filtering, then blank-only results stop
-   * here (Dart `processed.isEmpty`).
+   * highlighting_controller.dart:612-619 in place of the token-level path.
+   * `result.text` is surfaced before any filtering; blank-only results stop
+   * here (Dart `processed.isEmpty`) — and so never move the epoch, which defers
+   * a boundary onto the first result that actually carries tokens.
+   * A changing `streamEpoch` becomes `isNewSegment` (requirement (e)).
    */
   private _onTranscriptionResult(result: TranscriptionResult): void {
     if (this._isDisposed) return;
@@ -418,9 +456,7 @@ export class ReciteQuran {
     const cmd: SyncStreamCmd = {
       text: asrString,
       timestamps: asrTimestamps,
-      // The Dart facade never signals segment boundaries (:194 passes two args
-      // only), and it has no ayah matcher to name one — kept as-is.
-      isNewSegment: false,
+      isNewSegment: this._isNewSegment(result.streamEpoch),
       ayahNumber: 0,
     };
     this._guard(() => this._sequencer.syncStream(cmd));
@@ -496,6 +532,7 @@ export class ReciteQuran {
     this._isDisposed = true;
     this._isInitialized = false;
     this._isStarted = false;
+    this._lastStreamEpoch = null;
 
     // The Dart subscriptions are cancelled (no listener registry to keep).
     this._wordMatchedSubscribers.clear();

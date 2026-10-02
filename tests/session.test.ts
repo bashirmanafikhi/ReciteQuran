@@ -86,6 +86,24 @@ class FakeAsrTransport implements AsrTransport {
   static chars(words: string[]): string[] {
     return words.join('').split('');
   }
+
+  /**
+   * Delivers a result carrying no `streamEpoch` at all, as a non-native
+   * transport (or a bridge payload from before the field existed) does.
+   * `emit()`'s `streamEpoch: 0` default cannot express "absent", so the
+   * property is omitted rather than set to undefined.
+   */
+  emitWithoutEpoch(tokens: string[], timestamps: number[], text = ''): void {
+    if (this._onResult === null) throw new Error('FakeAsrTransport: emit() with no active start()');
+    const result = {
+      text,
+      isFinal: false,
+      startTime: 0,
+      tokens,
+      timestamps,
+    } as TranscriptionResult;
+    this._onResult(result);
+  }
 }
 
 interface SyntheticAyah {
@@ -628,6 +646,128 @@ describe('(e) jumpToWord reset behaviour', () => {
     session.resetBuffer();
     session.resetBuffer();
     expect(transport.calls).toEqual(['initialize', 'start', 'resetBuffer', 'resetBuffer']);
+    session.dispose();
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// (e) streamEpoch SEGMENT BOUNDARY — nativeTransport requirement (e)
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('(e) streamEpoch segment boundary', () => {
+  const WORDS = ['بسم', 'الله', 'رحمن'];
+
+  const ts = (chars: string[]) => chars.map((_, i) => 0.3 * (i + 1));
+  const full = (chars: string[]) => ({ tokens: chars, timestamps: ts(chars), text: chars.join('') });
+
+  /** The private sequencer, read for its re-base state (see reset() below). */
+  const sequencerOf = (session: ReciteQuran) =>
+    (session as unknown as {
+      _sequencer: {
+        currentSegmentAsrText: string;
+        targetWordCursor: number;
+        trimmedOffset: number;
+      };
+    })._sequencer;
+
+  async function segmentSession(words = WORDS): Promise<{
+    session: ReciteQuran;
+    transport: FakeAsrTransport;
+    events: WordMatchedEvent[];
+    resets: () => number;
+  }> {
+    const transport = new FakeAsrTransport();
+    const debug: DebugEvent[] = [];
+    const { session } = await newSession(
+      { surah: 2, ayahFrom: 1, ayahTo: 1, onDebug: (e) => debug.push(e) },
+      transport,
+      () => syntheticAsset(2, [{ words }]),
+    );
+    await session.start();
+    const events: WordMatchedEvent[] = [];
+    session.onWordMatched((e) => events.push(e));
+    return {
+      session,
+      transport,
+      events,
+      // sequencer.ts:176 logs one line per re-base; that IS the reset firing.
+      resets: () => debug.filter((d) => /New segment/.test(d.message)).length,
+    };
+  }
+
+  test('a stable epoch across many results never re-bases the sequencer', async () => {
+    const { session, transport, events, resets } = await segmentSession();
+    const chars = FakeAsrTransport.chars(WORDS);
+
+    transport.emitCumulative(chars, 0.3);
+    expect(events.map((e) => e.wordId)).toEqual([0, 1, 2]);
+
+    // Same epoch again: the consumed buffer is reused, so nothing re-matches
+    // and no boundary is announced ?? byte-identical to the hardcoded `false`.
+    transport.emit({ ...full(chars), streamEpoch: 0 });
+    expect(events.map((e) => e.wordId)).toEqual([0, 1, 2]);
+    expect(resets()).toBe(0);
+    session.dispose();
+  });
+
+  test('a bumped epoch re-bases, so the whole new segment matches again', async () => {
+    const { session, transport, events, resets } = await segmentSession([...WORDS, ...WORDS]);
+    const chars = FakeAsrTransport.chars(WORDS);
+
+    transport.emitCumulative(chars, 0.3);
+    expect(events.map((e) => e.wordId)).toEqual([0, 1, 2]);
+    expect(resets()).toBe(0);
+
+    // What a native resetBuffer() produces: fresh text under a new epoch. The
+    // boundary zeroes trimmedOffset, so the segment is applied whole and the
+    // next three words commit. Without the boundary, syncStream would apply
+    // `text.substring(trimmedOffset)` and chop the segment head away.
+    transport.emit({ ...full(chars), streamEpoch: 1 });
+    expect(resets()).toBe(1);
+    expect(events.map((e) => e.wordId)).toEqual([0, 1, 2, 3, 4, 5]);
+    session.dispose();
+  });
+
+  test('the first epoch seen is a first result, not a boundary', async () => {
+    const { session, transport, resets } = await segmentSession();
+    const chars = FakeAsrTransport.chars(WORDS);
+
+    transport.emit({ ...full(chars), streamEpoch: 7 });
+    transport.emit({ ...full(chars), streamEpoch: 7 });
+    expect(resets()).toBe(0);
+    session.dispose();
+  });
+
+  test('an absent streamEpoch is no signal and never re-bases', async () => {
+    const { session, transport, events, resets } = await segmentSession();
+    const chars = FakeAsrTransport.chars(WORDS);
+    const text = FakeAsrTransport.chars(WORDS);
+
+    transport.emitWithoutEpoch(text, full(chars).timestamps);
+    expect(events.map((e) => e.wordId)).toEqual([0, 1, 2]);
+
+    // No epoch at all ⇒ the Dart facade's hardcoded `isNewSegment: false`, so a
+    // re-delivered segment is consumed against the stale offset, not re-based.
+    transport.emitWithoutEpoch(text, full(chars).timestamps);
+    expect(events.map((e) => e.wordId)).toEqual([0, 1, 2]);
+    expect(resets()).toBe(0);
+    session.dispose();
+  });
+
+  test('a gap in reporting does not shift the baseline: only 4 -> 5 is a boundary', async () => {
+    const { session, transport, events, resets } = await segmentSession([...WORDS, ...WORDS]);
+    const chars = FakeAsrTransport.chars(WORDS);
+
+    transport.emit({ ...full(chars), streamEpoch: 4 });
+    expect(resets()).toBe(0);
+
+    // An un-epoch'd result in between must not become the new baseline.
+    transport.emitWithoutEpoch(chars, full(chars).timestamps);
+    expect(resets()).toBe(0);
+
+    transport.emit({ ...full(chars), streamEpoch: 5 });
+    expect(resets()).toBe(1);
+    expect(events.map((e) => e.wordId)).toEqual([0, 1, 2, 3, 4, 5]);
     session.dispose();
   });
 });
