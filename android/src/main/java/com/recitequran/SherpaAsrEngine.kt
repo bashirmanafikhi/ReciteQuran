@@ -1,6 +1,7 @@
 package com.recitequran
 
 import android.util.Log
+import java.io.File
 import com.k2fsa.sherpa.onnx.EndpointConfig
 import com.k2fsa.sherpa.onnx.EndpointRule
 import com.k2fsa.sherpa.onnx.FeatureConfig
@@ -21,7 +22,7 @@ import com.k2fsa.sherpa.onnx.WaveReader
  * |-----------------------------|-----------------------------|
  * | `tryCreateRecognizer()`     | [newRecognizer]             |
  * | `accelName = 'xnnpack'`     | [PROVIDER_XNNPACK]          |
- * | marker files → try/catch    | plain try/catch in [start]  |
+ * | xnnpack marker files        | [start] — [MARKER_ATTEMPTED]/[MARKER_VERIFIED] |
  * | `createStream()`            | [start]                     |
  * | `Float32List(7680)` priming | [prime]                     |
  * | `acceptWaveform/decode`     | [feed] / [resetBuffer]      |
@@ -43,6 +44,8 @@ class SherpaAsrEngine(
     private val modelPath: String,
     private val tokensPath: String,
     private val debug: Boolean = false,
+    /** Directory for the xnnpack crash-loop markers; see [start]. */
+    private val markerDir: File? = null,
 ) {
 
     /** Result sink; mirrors `SherpaTranscriptionEvent`. */
@@ -86,6 +89,15 @@ class SherpaAsrEngine(
 
         /** Feed/wav framing unit; identical to `AudioRecorder.CHUNK_SAMPLES`. */
         const val CHUNK_SAMPLES = 7680
+
+        /**
+         * Written BEFORE the first xnnpack attempt and never cleared — the Android equivalent of
+         * Dart's `xnnpack_lock` / `xnnpack_disabled` pair. See [start].
+         */
+        private const val MARKER_ATTEMPTED = "_attempted"
+
+        /** Written after xnnpack survived priming; equivalent to Dart's `xnnpack_verified`. */
+        private const val MARKER_VERIFIED = "_ok"
     }
 
     private var recognizer: OnlineRecognizer? = null
@@ -103,29 +115,86 @@ class SherpaAsrEngine(
         get() = recognizer != null
 
     /**
-     * Creates the recognizer (xnnpack, falling back to cpu), creates the stream and
-     * primes it with 480 ms of silence — sherpa_engine_io.dart:344-366.
+     * Creates the recognizer (xnnpack, falling back to cpu), creates the stream and primes it
+     * with 480 ms of silence — sherpa_engine_io.dart:344-366.
+     *
+     * XNNPACK CRASH-LOOP GUARD (sherpa_engine_io.dart:309-342, :368-374). A SIGILL/SIGSEGV inside
+     * `decode()` is a native abort that Kotlin cannot catch, so it must be prevented by markers
+     * rather than by `try/catch`:
+     *
+     * | Dart                                    | Kotlin                                   |
+     * |-----------------------------------------|------------------------------------------|
+     * | `xnnpack_disabled` → cpu forever        | `xnnpack_attempted` && !`xnnpack_ok`     |
+     * | `xnnpack_verified` → accel unconditionally | `xnnpack_ok` → accel unconditionally  |
+     * | `xnnpack_lock` written pre-attempt      | `xnnpack_attempted` written pre-attempt  |
+     *
+     * The attempt marker is written BEFORE the risky call, so a process that dies natively still
+     * leaves it behind and every later launch takes the CPU path instead of crash-looping. When
+     * [markerDir] is null (no writable directory) the guard is inert and the previous
+     * try/catch-only behaviour applies.
      */
     fun start() {
         if (recognizer != null) return
 
+        val attempted = markerFile(MARKER_ATTEMPTED)
+        val verified = markerFile(MARKER_VERIFIED)
+
         var selected = PROVIDER_XNNPACK
-        val created = try {
-            newRecognizer(selected)
-        } catch (error: Throwable) {
-            // Graceful Kotlin/C++ exception during model loading. The Dart version also
-            // wrote an `xnnpack_disabled` marker file here; the Task 11 brief asks for the
-            // simplified try/catch (see task-11-report.md §5).
-            Log.w(TAG, "provider=$PROVIDER_XNNPACK failed (${error.message}); falling back to $PROVIDER_CPU", error)
+        if (attempted != null && attempted.isFile && (verified == null || !verified.isFile)) {
+            // A previous process started xnnpack but never recorded success, which can only
+            // happen if the process died natively inside decode().
+            Log.w(
+                TAG,
+                "xnnpack was attempted before but never verified (native crash); " +
+                    "using $PROVIDER_CPU for this and every later launch",
+            )
             selected = PROVIDER_CPU
-            newRecognizer(selected)
+        }
+
+        var created: OnlineRecognizer? = null
+        if (selected == PROVIDER_XNNPACK) {
+            writeMarker(attempted)
+            try {
+                created = newRecognizer(PROVIDER_XNNPACK)
+            } catch (error: Throwable) {
+                // Graceful Kotlin/C++ exception during model loading (not a native abort). The
+                // attempt marker is deliberately left in place, so later launches stay on cpu.
+                Log.w(
+                    TAG,
+                    "provider=$PROVIDER_XNNPACK failed (${error.message}); " +
+                        "falling back to $PROVIDER_CPU",
+                    error,
+                )
+                selected = PROVIDER_CPU
+            }
+        }
+        if (created == null) {
+            // Not wrapped in try/catch on purpose: a cpu failure is fatal and must propagate to
+            // the caller, exactly like `rethrow` at sherpa_engine_io.dart:358.
+            created = newRecognizer(selected)
         }
 
         provider = selected
         recognizer = created
         stream = created.createStream()
-        Log.i(TAG, "recognizer ready (provider=$provider, epoch=$streamEpoch)")
         prime()
+        // Priming decode() returned, so xnnpack is safe on this device. Only mark it verified when
+        // the accelerated provider actually ran (Dart: `provider == accelName`).
+        if (provider == PROVIDER_XNNPACK) writeMarker(verified)
+        Log.i(TAG, "recognizer ready (provider=$provider, epoch=$streamEpoch)")
+    }
+
+    private fun markerFile(suffix: String): File? =
+        markerDir?.let { File(it, PROVIDER_XNNPACK + suffix) }
+
+    private fun writeMarker(file: File?) {
+        if (file == null) return
+        try {
+            file.parentFile?.mkdirs()
+            if (!file.exists()) file.createNewFile()
+        } catch (error: Throwable) {
+            Log.w(TAG, "could not write marker ${file.name}", error)
+        }
     }
 
     /**
@@ -133,6 +202,13 @@ class SherpaAsrEngine(
      *
      * Emits the partial result unless an endpoint was detected or [isFinal] was requested,
      * then (for `isFinal || endpointDetected`) drains and emits the final result.
+     *
+     * PARITY NOTE — the stream is then permanently finished. Passing `isFinal = true` calls
+     * [OnlineStream.inputFinished], which drains the endpointing state machine; every later
+     * [feed] on that stream is meaningless. An endpoint detected by rule1/rule2/rule3 ends the
+     * utterance the same way. Call [resetBuffer] to obtain a fresh stream before resuming
+     * recognition — the Dart app behaves identically (`SherpaEngine.resetBuffer` is the only way
+     * to restart recognition after a final or endpointed result).
      */
     fun feed(samples: FloatArray, isFinal: Boolean, startTime: Long, listener: Listener) {
         val recognizer = this.recognizer ?: return
@@ -183,6 +259,9 @@ class SherpaAsrEngine(
      * Debug/verification path: decodes a WAV file in 480 ms frames and emits results for
      * every frame, the last one as final. [WaveReader.readWave] normalises 16-bit PCM to
      * [-1.0, 1.0] floats, matching `wav.astype(np.float32) / 32768.0` in the training pipeline.
+     *
+     * PARITY NOTE — always consumes the stream to a final result, so the stream is permanently
+     * finished afterwards. Call [resetBuffer] before feeding further microphone audio.
      */
     fun processWav(path: String, listener: Listener) {
         val wave = WaveReader.readWave(path)
@@ -257,10 +336,31 @@ class SherpaAsrEngine(
                     provider = providerName,
                     modelType = MODEL_TYPE,
                 ),
-                endpointConfig = EndpointConfig(
-                    rule1 = EndpointRule(false, 10.0f, 0.0f),
-                    rule2 = EndpointRule(true, 4.0f, 0.0f),
-                    rule3 = EndpointRule(false, 0.0f, 9999.0f),
+                // Endpoint rules, ported from sherpa_engine_io.dart:288-291. The Kotlin binding's parameter
+// names come from upstream sherpa-onnx and differ from the Dart field names, so each one is
+// named below to make the cross-language mapping explicit and reorder-proof.
+//
+// | Dart `rule1`/`rule2`/`rule3`        | EndpointRule                      |
+// |-------------------------------------|-----------------------------------|
+// | mustContainNonsilence               | mustContainNonSilence             |
+// | mustContainNonsilenceDuration: 10/4 | minTrailingSilence                |
+// | mustContainSilenceDuration: 0 / 9999| minUtteranceLength                |
+endpointConfig = EndpointConfig(
+                    rule1 = EndpointRule(
+                        mustContainNonSilence = false,
+                        minTrailingSilence = 10.0f,
+                        minUtteranceLength = 0.0f,
+                    ),
+                    rule2 = EndpointRule(
+                        mustContainNonSilence = true,
+                        minTrailingSilence = 4.0f,
+                        minUtteranceLength = 0.0f,
+                    ),
+                    rule3 = EndpointRule(
+                        mustContainNonSilence = false,
+                        minTrailingSilence = 0.0f,
+                        minUtteranceLength = 9999.0f,
+                    ),
                 ),
                 enableEndpoint = true,
             ),

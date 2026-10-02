@@ -19,6 +19,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 
 /**
@@ -148,6 +149,7 @@ class ReciteQuranModule(reactContext: ReactApplicationContext) :
                     model.absolutePath,
                     tokens.absolutePath,
                     isDebuggableApp(),
+                    markerDir = cacheDir,
                 )
                 created.start()
                 engine = created
@@ -253,13 +255,21 @@ class ReciteQuranModule(reactContext: ReactApplicationContext) :
         }
 
         val startTime = System.currentTimeMillis()
-        asrThread.execute {
-            try {
-                current.feed(samples, isFinal, startTime, resultListener)
-            } catch (error: Throwable) {
-                Log.e(TAG, "feedAudioBase64() failed", error)
-                emitError(describe(error))
+        try {
+            // The executor is shut down by invalidate(); a late call from JS must not throw a
+            // RejectedExecutionException back across the bridge, and `current` must not be
+            // handed to a queue that will never run.
+            asrThread.execute {
+                try {
+                    current.feed(samples, isFinal, startTime, resultListener)
+                } catch (error: Throwable) {
+                    Log.e(TAG, "feedAudioBase64() failed", error)
+                    emitError(describe(error))
+                }
             }
+        } catch (rejected: RejectedExecutionException) {
+            Log.w(TAG, "feedAudioBase64() ignored: the module is being invalidated")
+            return false
         }
         return true
     }
@@ -287,19 +297,32 @@ class ReciteQuranModule(reactContext: ReactApplicationContext) :
     }
 
     override fun invalidate() {
+        var drained = false
         try {
             recorder.stop()
             asrThread.shutdown()
             try {
-                if (!asrThread.awaitTermination(SHUTDOWN_TIMEOUT_S, TimeUnit.SECONDS)) {
+                if (asrThread.awaitTermination(SHUTDOWN_TIMEOUT_S, TimeUnit.SECONDS)) {
+                    drained = true
+                } else {
+                    // A task is still inside engine.feed(), touching the native recognizer and
+                    // stream. shutdownNow() only interrupts, so releasing now would free those
+                    // objects underneath the running call. Leaking is the safer failure mode.
+                    Log.w(
+                        TAG,
+                        "ASR thread did not drain within ${SHUTDOWN_TIMEOUT_S}s; " +
+                            "skipping engine release (leaking native recognizer)",
+                    )
                     asrThread.shutdownNow()
                 }
             } catch (interrupted: InterruptedException) {
                 asrThread.shutdownNow()
                 Thread.currentThread().interrupt()
             }
-            engine?.release()
-            engine = null
+            if (drained) {
+                engine?.release()
+                engine = null
+            }
         } catch (error: Throwable) {
             Log.e(TAG, "invalidate() failed", error)
         }

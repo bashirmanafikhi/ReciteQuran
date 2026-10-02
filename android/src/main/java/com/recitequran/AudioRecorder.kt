@@ -53,6 +53,9 @@ class AudioRecorder(private val onChunk: (FloatArray) -> Unit) {
 
         /** Task 11 brief; differs from the Dart app's `AudioSource.DEFAULT` (see class docs). */
         val AUDIO_SOURCE = MediaRecorder.AudioSource.VOICE_RECOGNITION
+
+        /** Upper bound on how long stop() waits for the capture thread to leave read(). */
+        private const val THREAD_JOIN_TIMEOUT_MS = 500L
     }
 
     private var record: AudioRecord? = null
@@ -115,13 +118,14 @@ class AudioRecorder(private val onChunk: (FloatArray) -> Unit) {
         }
     }
 
-    /** Stops capture, releases the effects and the AudioRecord, and joins the thread. */
+    /** Stops capture, joins the capture thread, then releases the effects and the AudioRecord. */
     fun stop() {
         running = false
 
         val recorder = record
         record = null
         if (recorder != null) {
+            // stop() FIRST: it unblocks a thread parked in read() and makes the loop exit.
             try {
                 if (recorder.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                     recorder.stop()
@@ -129,18 +133,39 @@ class AudioRecorder(private val onChunk: (FloatArray) -> Unit) {
             } catch (error: IllegalStateException) {
                 Log.w(TAG, "AudioRecord.stop() failed", error)
             }
-            releaseAudioEffects()
-            recorder.release()
         }
 
-        thread?.let { worker ->
+        // Join BEFORE release(). A thread that already passed `while (running)` can be inside
+        // read() when release() frees the handle; the resulting native abort is NOT a catchable
+        // IllegalStateException, so freeing underneath it crashes the process.
+        val worker = thread
+        thread = null
+        var joined = true
+        if (worker != null) {
             try {
-                worker.join(500L)
+                worker.join(THREAD_JOIN_TIMEOUT_MS)
+                joined = !worker.isAlive
             } catch (interrupted: InterruptedException) {
+                joined = false
                 Thread.currentThread().interrupt()
             }
         }
-        thread = null
+
+        if (recorder != null) {
+            releaseAudioEffects()
+            if (joined) {
+                recorder.release()
+            } else {
+                // Leaking the recorder is strictly better than a native abort underneath a live
+                // thread; the OS reclaims it when the process dies. Unreachable in practice
+                // because stop() above already unblocks read().
+                Log.w(
+                    TAG,
+                    "capture thread still alive after ${THREAD_JOIN_TIMEOUT_MS}ms; " +
+                        "leaking AudioRecord instead of releasing it",
+                )
+            }
+        }
     }
 
     private fun captureLoop(recorder: AudioRecord, bufferSize: Int) {
@@ -152,6 +177,10 @@ class AudioRecorder(private val onChunk: (FloatArray) -> Unit) {
             recorder.startRecording()
 
             while (running) {
+                // Re-read the volatile immediately before entering the blocking read, so a
+                // concurrent stop() that flipped the flag is observed here rather than after we
+                // are already parked inside AudioRecord.read().
+                if (!running) break
                 val read = try {
                     recorder.read(readBuffer, 0, readBuffer.size)
                 } catch (error: IllegalStateException) {
