@@ -12,6 +12,16 @@ export type {
   SetTargetSurahOptions,
 } from './session';
 
+// React Native binding. Importing this is safe in Node: `react-native` is only
+// required once a lifecycle method runs (src/nativeModule.ts).
+export { createNativeTransport, NativeTransportError } from './nativeTransport';
+export type {
+  CreateNativeTransportOptions,
+  NativeAsrTransport,
+  NativeTransportErrorCode,
+  SegmentChangeEvent,
+} from './nativeTransport';
+
 export {
   copyWithConfig,
   easyConfig,
