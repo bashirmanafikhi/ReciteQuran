@@ -1,0 +1,17 @@
+name: harness_dart
+description: Dart reference verification harness for ReciteQuran.
+version: 1.0.0
+publish_to: none
+
+environment:
+  sdk: ^3.5.0
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  sherpa_onnx: ^1.13.5
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
