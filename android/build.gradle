@@ -95,7 +95,45 @@ repositories {
     maven { url = uri("https://jitpack.io") }
 }
 
+// Hosts that already ship com.k2fsa.sherpa.onnx.* — e.g. via react-native-sherpa-onnx —
+// set reciteQuranExternalSherpa=true in gradle.properties. The module then compiles
+// against the SDK's extracted classes and leaves packaging them to the SDK, instead of
+// adding the JitPack AAR (two copies of the classes fail dexing with
+// "Duplicate class com.k2fsa.sherpa.onnx.AudioEvent").
+def useExternalSherpa = project.findProperty("reciteQuranExternalSherpa") == "true"
+
 dependencies {
     implementation "com.facebook.react:react-android"
-    implementation "com.github.k2-fsa.sherpa-onnx:sherpa-onnx:1.13.6"
+
+    if (useExternalSherpa) {
+        // compileOnly, not implementation: the classes are needed to compile this
+        // module's `import com.k2fsa.sherpa.onnx.*`, but must not be packaged again
+        // here — the host's sherpa-onnx SDK already contributes them to the APK.
+        // The SDK declares them as `implementation`, so they are not visible to
+        // other modules and have to be named explicitly.
+        compileOnly files("$rootDir/../node_modules/react-native-sherpa-onnx/android/build/sherpa-onnx-classes/classes.jar")
+    } else {
+        implementation "com.github.k2-fsa.sherpa-onnx:sherpa-onnx:1.13.6"
+    }
+}
+
+// The classes.jar above is a *task output* of the SDK's extractSherpaOnnxClasses, so
+// consuming it without declaring the relationship makes Gradle fail with "uses
+// this output of task ... without declaring an explicit or implicit dependency".
+// Ordering the compile tasks after the extraction keeps a clean build correct.
+// The dependency is declared as a STRING task path: paths are resolved when the
+// task graph is built, while findByName() would need the SDK project configured
+// right now — under Expo's --configure-on-demand it isn't, so the lookup would
+// return null and the fix would silently never apply.
+afterEvaluate {
+    if (useExternalSherpa && rootProject.findProject(':react-native-sherpa-onnx') != null) {
+        def sherpaClassesJar = "$rootDir/../node_modules/react-native-sherpa-onnx/android/build/sherpa-onnx-classes/classes.jar"
+        tasks.withType(JavaCompile).configureEach { t ->
+            t.dependsOn ':react-native-sherpa-onnx:extractSherpaOnnxClasses'
+            t.inputs.file(sherpaClassesJar)
+        }
+        tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach { t ->
+            t.dependsOn ':react-native-sherpa-onnx:extractSherpaOnnxClasses'
+        }
+    }
 }

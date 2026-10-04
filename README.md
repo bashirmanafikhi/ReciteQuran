@@ -31,6 +31,12 @@ The native module autolinks. Add the Expo plugin to your `app.json` to automatic
 
 > If your host app's `settings.gradle` uses `dependencyResolutionManagement` with `RepositoriesMode.FAIL_ON_PROJECT_REPOS`, also add `maven { url 'https://jitpack.io' }` there — the Android module pulls `com.github.k2-fsa.sherpa-onnx:sherpa-onnx:1.13.6` from JitPack.
 
+**Already shipping sherpa-onnx classes?** If your app already includes [`react-native-sherpa-onnx`](https://www.npmjs.com/package/react-native-sherpa-onnx) (or anything else providing the `com.k2fsa.sherpa.onnx.*` classes), adding this library's JitPack AAR would put two copies of those classes in the APK and fail the build with `Duplicate class com.k2fsa.sherpa.onnx.AudioEvent`. Set the following in your app's `gradle.properties` and this module will compile against `react-native-sherpa-onnx`'s extracted classes instead of packaging its own AAR:
+
+```properties
+reciteQuranExternalSherpa=true
+```
+
 ## Model & Data Requirements
 
 Two runtime inputs are required. Neither is bundled with the package (the ONNX model alone is ~70 MB):
