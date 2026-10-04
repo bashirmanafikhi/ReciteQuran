@@ -6,11 +6,11 @@
   "author": "bashirmanafikhi",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bashirmanafikhi/ReciteQuran.git"
+    "url": "git+https://github.com/bashirmanafikhi/react-native-recite-quran.git"
   },
-  "homepage": "https://github.com/bashirmanafikhi/ReciteQuran#readme",
+  "homepage": "https://github.com/bashirmanafikhi/react-native-recite-quran#readme",
   "bugs": {
-    "url": "https://github.com/bashirmanafikhi/ReciteQuran/issues"
+    "url": "https://github.com/bashirmanafikhi/react-native-recite-quran/issues"
   },
   "keywords": [
     "react-native",
