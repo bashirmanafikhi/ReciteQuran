@@ -74,3 +74,6 @@ verification/**/node_modules/
 *.tsbuildinfo
 assets/model/*.onnx
 verification/out/
+
+# Flutter add-to-app generated host (not part of the RN library)
+android/app/

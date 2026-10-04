@@ -124,6 +124,13 @@ class ReciteQuranModule(reactContext: ReactApplicationContext) :
     override fun getName(): String = NAME
 
     // ─── Bridge methods ───────────────────────────────────────────────────────────────
+    //
+    // `isBlockingSynchronousMethod` must be set if and only if the Kotlin return type is
+    // non-void. TurboModuleInteropUtils (RN 0.81, TurboModuleInteropUtils.kt:58-64) throws
+    // ParsingException on `sync && void` and on `async && !void`, and it does so lazily — the
+    // first time JS touches NativeModules.ReciteQuran — so a wrong flag on any single method
+    // makes the whole module fail to load and surfaces as an unrelated-looking
+    // "initialize() failed". Only feedAudioBase64 returns a value and is therefore synchronous.
 
     /**
      * Resolves `{ok: true}` once the model, the tokens and the recognizer are ready, or
@@ -239,7 +246,7 @@ class ReciteQuranModule(reactContext: ReactApplicationContext) :
      * it exactly like a captured chunk. Returns whether the chunk was accepted (the recognizer
      * must be initialized); results still arrive asynchronously as `ReciteQuranTokenResult`.
      */
-    @ReactMethod
+    @ReactMethod(isBlockingSynchronousMethod = true)
     fun feedAudioBase64(audioBase64: String, isFinal: Boolean): Boolean {
         val current = engine
         if (current == null) {

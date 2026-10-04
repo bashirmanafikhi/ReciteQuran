@@ -2,20 +2,42 @@
   "name": "react-native-recite-quran",
   "version": "0.1.0",
   "description": "On-device Quran recitation tracking (Zipformer2-CTC + DTW + Tajweed) for React Native / Expo (Android)",
+  "license": "SEE LICENSE IN LICENSE",
+  "author": "bashirmanafikhi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bashirmanafikhi/ReciteQuran.git"
+  },
+  "homepage": "https://github.com/bashirmanafikhi/ReciteQuran#readme",
+  "bugs": {
+    "url": "https://github.com/bashirmanafikhi/ReciteQuran/issues"
+  },
+  "keywords": [
+    "react-native",
+    "expo",
+    "quran",
+    "recitation",
+    "tajweed",
+    "speech-recognition",
+    "onnx",
+    "sherpa-onnx",
+    "android"
+  ],
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
     "dist",
-    "android",
     "plugin",
-    "app.plugin.ts",
     "assets/model/tokens.txt",
-    "assets/model/ordered_quran_phonemes.json"
+    "android/build.gradle",
+    "android/proguard-rules.pro",
+    "android/src"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc --noEmit",
-    "test": "jest --passWithNoTests"
+    "test": "jest --passWithNoTests",
+    "prepack": "npm run build"
   },
   "peerDependencies": {
     "react": "*",

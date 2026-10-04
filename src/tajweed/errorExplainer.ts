@@ -225,7 +225,6 @@ export function evaluatePreAlignedWords(
     targetCharCursor,
     startWordId,
     nextWordId,
-    totalAyahWords,
     expectedWordRules,
     config,
   } = args;
@@ -514,7 +513,7 @@ function _evaluateSpan(args: {
   wordRefEnd: number;
   config: TrackerConfig;
 }): ReciterError[] {
-  const { span, predText, spanDuration, hasDelete, wordText, wordRefEnd, config } = args;
+  const { span, predText, spanDuration, wordRefEnd, config } = args;
   const errors: ReciterError[] = [];
   const hBase = config.harakatDurationSeconds;
 

@@ -67,12 +67,15 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_8
-        targetCompatibility JavaVersion.VERSION_1_8
+        // Java 17, not 1.8: React Native's JdkConfiguratorUtils forces the Java
+        // side of every module to 17, and a 1.8 Kotlin target against a 17 Java
+        // target fails the module with "Inconsistent JVM-target compatibility".
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 
     kotlinOptions {
-        jvmTarget = "1.8"
+        jvmTarget = "17"
     }
 
     sourceSets {
