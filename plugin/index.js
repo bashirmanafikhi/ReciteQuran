@@ -1,4 +1,4 @@
-const { withInfoPlist, AndroidConfig } = require('@expo/config-plugins');
+const { withInfoPlist, AndroidConfig } = require('expo/config-plugins');
 
 const { withPermissions } = AndroidConfig.Permissions;
 
