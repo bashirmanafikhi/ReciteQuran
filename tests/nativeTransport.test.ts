@@ -669,7 +669,7 @@ describe('createNativeTransport', () => {
   });
 
   describe('stream finished after a final result', () => {
-    it('resets the buffer before resuming when a final result ended the stream', async () => {
+    it('resets the stream eagerly when a final result ends it, so the resume needs no further reset', async () => {
       mockNative.start.mockImplementation(() => track('start'));
       mockNative.resetBuffer.mockImplementation(() => track('resetBuffer'));
       const transport = createNativeTransport();
@@ -683,12 +683,17 @@ describe('createNativeTransport', () => {
       transport.start(onResult);
       await flush();
 
-      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(1);
-      expect(callLog()).toEqual(['start', 'resetBuffer', 'start']);
+      // One adoption reset before the first start (requirement (f)), one eager
+      // reset the moment the final landed (requirement (d), live-mic leg) — the
+      // live microphone never resumes through a JS feed, so waiting for the
+      // resume would decode the next 480 ms chunk into the dead stream. The
+      // resume itself finds a fresh stream and adds nothing.
+      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(2);
+      expect(callLog()).toEqual(['resetBuffer', 'start', 'resetBuffer', 'start']);
       transport.destroy();
     });
 
-    it('does not reset when the previous result was a live partial', async () => {
+    it('does not reset again when the previous result was a live partial', async () => {
       const transport = createNativeTransport();
       await transport.initialize();
       transport.start(onResult);
@@ -699,11 +704,13 @@ describe('createNativeTransport', () => {
       transport.start(onResult);
       await flush();
 
-      expect(mockNative.resetBuffer).not.toHaveBeenCalled();
+      // The single call is the adoption reset; a partial never finishes the
+      // stream, so neither the stop/resume nor the partial itself resets.
+      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(1);
       transport.destroy();
     });
 
-    it('does not reset twice when resetBuffer() was already called', async () => {
+    it('does not reset again on the resume when resetBuffer() was already called', async () => {
       const transport = createNativeTransport();
       await transport.initialize();
       transport.start(onResult);
@@ -711,13 +718,14 @@ describe('createNativeTransport', () => {
       emitTokenResult({ isFinal: true });
 
       transport.resetBuffer();
-      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(1);
+      // Adoption reset (first start) + eager reset (the final) + this explicit one.
+      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(3);
 
       await transport.stop();
       transport.start(onResult);
       await flush();
 
-      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(1);
+      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(3);
       transport.destroy();
     });
 
@@ -729,7 +737,9 @@ describe('createNativeTransport', () => {
       transport.start(onResult);
       await flush();
 
-      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(1);
+      // Adoption reset before processWav + the lazy resume reset (the JS feed
+      // path has no eager reset — that is the live-microphone leg only).
+      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(2);
       transport.destroy();
     });
   });
@@ -772,7 +782,9 @@ describe('createNativeTransport', () => {
       transport.start(onResult);
       await flush();
 
-      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(1);
+      // Adoption reset before the feed + the lazy resume reset (the JS feed
+      // path has no eager reset — that is the live-microphone leg only).
+      expect(mockNative.resetBuffer).toHaveBeenCalledTimes(2);
       transport.destroy();
     });
   });

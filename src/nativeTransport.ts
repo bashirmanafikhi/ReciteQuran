@@ -24,13 +24,23 @@
 //       layer builds the call from the declared arity.
 //   (d) After any `isFinal` result (endpoint or explicit flush) and after
 //       `processWav`, the native stream is permanently finished
-//       (SherpaAsrEngine.kt:206-211, :263-264). The transport therefore tracks
-//       that state and resets the buffer before it resumes recognition, instead
-//       of leaving a dead stream behind.
+//       (SherpaAsrEngine.kt:206-211, :263-264). The transport resets that
+//       stream eagerly, the moment the final arrives — the live microphone
+//       feeds the engine natively, so its next 480 ms chunk never passes
+//       through a JS feed method where the lazy "reset before the next feed"
+//       could run — and keeps the lazy reset before a JS-initiated resume as a
+//       second net.
 //   (e) A changed `streamEpoch` is surfaced through `onSegmentChange` and
 //       carried on every `TranscriptionResult`, which is what the sequencer
 //       needs to re-base instead of the Dart facade's hardcoded
 //       `isNewSegment: false` (session.ts:423).
+//   (f) The native engine is process-wide and stays warm between sessions,
+//       while every transport instance is fresh. A new transport therefore
+//       adopts an unknown stream and resets the buffer once, before its first
+//       feed (`start()`, `feedAudioBase64()` or `processWav()`): the previous
+//       session's decode state — trailing audio and the partial hypothesis —
+//       would otherwise be re-emitted as this session's first results and
+//       re-commit words nobody recited here.
 
 import {
   addNativeListener,
@@ -74,6 +84,14 @@ export interface NativeAsrTransport extends AsrTransport {
   onError(cb: (error: NativeTransportError) => void): () => void;
   /** Requirement (e): the reset/segment boundary. */
   onSegmentChange(cb: (event: SegmentChangeEvent) => void): () => void;
+  /**
+   * Epoch time (ms) of the last native result — partials included. A live
+   * microphone emits a result for every 480 ms chunk even in silence, so this
+   * is the liveness signal that tells "reciter paused" (results keep flowing,
+   * text stays empty) from "pipeline dead" (no results at all). Null until the
+   * first result of this transport arrives.
+   */
+  readonly lastResultAt: number | null;
   /**
    * Offline/test feed path: base64 of little-endian float32 samples in [-1, 1].
    * Returns whether the bridge accepted the chunk; because that boolean means
@@ -142,10 +160,23 @@ class NativeAsrTransportImpl implements NativeAsrTransport {
 
   /**
    * Requirement (d): after a final result the native stream can no longer be
-   * fed, so the transport remembers it and resets before resuming.
+   * fed. The stream is reset eagerly when the final arrives (the live mic
+   * never resumes through a JS feed); this flag still gates the lazy reset
+   * before a JS-initiated resume, as a second net.
    */
   private _streamFinished = false;
   private _streamEpoch: number | null = null;
+
+  /** Native-result liveness for the host watchdog (see the interface doc). */
+  private _lastResultAt: number | null = null;
+
+  /**
+   * Requirement (f): a fresh transport adopts a shared, possibly warm native
+   * engine, so its first feed must start from a reset stream. Reset exactly
+   * once per transport — a later `resetBuffer()` is the caller's decision
+   * (`resetBuffer()`, or the resume after a final in `_beginStart`).
+   */
+  private _streamAdopted = false;
 
   private _onResult: ((result: TranscriptionResult) => void) | null = null;
   private _detachListeners: (() => void) | null = null;
@@ -155,6 +186,10 @@ class NativeAsrTransportImpl implements NativeAsrTransport {
 
   constructor(modelUrl: string | undefined) {
     this._modelUrl = modelUrl ?? null;
+  }
+
+  get lastResultAt(): number | null {
+    return this._lastResultAt;
   }
 
   // ── AsrTransport ───────────────────────────────────────────────────────────
@@ -240,6 +275,7 @@ class NativeAsrTransportImpl implements NativeAsrTransport {
 
   feedAudioBase64(audioBase64: string, isFinal = false): boolean {
     this._assertUsable('feedAudioBase64');
+    this._adoptStream();
     let accepted: boolean;
     try {
       accepted = getNativeModule().feedAudioBase64(audioBase64, isFinal);
@@ -252,6 +288,7 @@ class NativeAsrTransportImpl implements NativeAsrTransport {
 
   async processWav(path: string): Promise<void> {
     this._assertUsable('processWav');
+    this._adoptStream();
     try {
       await getNativeModule().processWav(path);
     } catch (error) {
@@ -331,6 +368,8 @@ class NativeAsrTransportImpl implements NativeAsrTransport {
       }
       await this._ensurePermission();
       // Requirement (d): a stream that ended on a final cannot be fed again.
+      // Requirement (f): the first feed adopts the shared engine's stream.
+      this._adoptStream();
       if (this._streamFinished) this._resetStream();
       if (this._destroyed) return;
       getNativeModule().start();
@@ -352,6 +391,25 @@ class NativeAsrTransportImpl implements NativeAsrTransport {
   private _resetStream(): void {
     getNativeModule().resetBuffer();
     this._streamFinished = false;
+  }
+
+  /**
+   * Requirement (f): resets the native stream the first time this transport
+   * feeds audio. The engine outlives the session that created it, so without
+   * this the new session inherits the previous one's decode state and its
+   * first results re-commit the previous session's words. A failure is
+   * reported but not raised: feeding an unreset stream degrades tracking,
+   * which the caller still handles, while a throw here would abort a start
+   * that the bridge has already accepted.
+   */
+  private _adoptStream(): void {
+    if (this._streamAdopted) return;
+    this._streamAdopted = true;
+    try {
+      this._resetStream();
+    } catch (error) {
+      this._report(toNativeTransportError(error, 'E_NATIVE', 'stream adoption reset failed'));
+    }
   }
 
   private _assertUsable(operation: string): void {
@@ -398,6 +456,7 @@ class NativeAsrTransportImpl implements NativeAsrTransport {
     if (this._destroyed) return;
 
     const result = toTranscriptionResult(payload);
+    this._lastResultAt = Date.now();
     if (result.isFinal) this._streamFinished = true;
 
     const previousEpoch = this._streamEpoch;
@@ -410,12 +469,37 @@ class NativeAsrTransportImpl implements NativeAsrTransport {
     }
 
     const handler = this._onResult;
-    if (handler === null) return;
+    if (handler !== null) {
+      try {
+        handler(result);
+      } catch (error) {
+        // A throwing subscriber must not tear down the bridge's event delivery.
+        this._report(toNativeTransportError(error, 'E_NATIVE', 'onResult subscriber threw'));
+      }
+    }
+
+    // Requirement (d), live-microphone leg: the final above ended the stream.
+    if (result.isFinal) this._resetFinishedStream();
+  }
+
+  /**
+   * Requirement (d) for the live microphone. A final result (endpoint or
+   * explicit flush) leaves the native stream permanently finished, and the mic
+   * keeps feeding 480 ms chunks natively — straight into `engine.feed()`, never
+   * through `feedAudioBase64()`/`processWav()` — so the lazy "reset before the
+   * next JS feed" contract can never run mid-session. Without this reset the
+   * decoder keeps filling the finished stream: partials stay gated off after
+   * the endpoint, the epoch never bumps, and the session never matches another
+   * word. Resetting the moment the final lands gives the next utterance a
+   * fresh stream whose epoch bump surfaces as the segment change the
+   * sequencer re-bases on (requirement (e)).
+   */
+  private _resetFinishedStream(): void {
+    if (this._destroyed || !this._initialized) return;
     try {
-      handler(result);
+      this._resetStream();
     } catch (error) {
-      // A throwing subscriber must not tear down the bridge's event delivery.
-      this._report(toNativeTransportError(error, 'E_NATIVE', 'onResult subscriber threw'));
+      this._report(toNativeTransportError(error, 'E_NATIVE', 'post-final stream reset failed'));
     }
   }
 

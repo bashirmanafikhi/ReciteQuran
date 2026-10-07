@@ -137,6 +137,13 @@ class ReciteQuranModule(reactContext: ReactApplicationContext) :
      * `{ok: false, error}` — the Dart app extracted both files before spawning the isolate
      * (sherpa_engine_io.dart:142-156). Idempotent, like `SherpaEngine.initialize()`.
      *
+     * The engine is process-wide and stays warm between sessions (the Dart app built a
+     * fresh isolate — stream included — per session). A session that re-initializes an
+     * already-warm engine therefore adopts the previous session's stream, so [resetBuffer]
+     * wipes it first: its decode state still holds the previous session's trailing audio
+     * and partial hypothesis, and the next [feed] would re-emit them as the new session's
+     * first results — words nobody recited in this session.
+     *
      * @param modelPath optional pre-existing `.onnx` on device; when omitted the model is
      *   taken from the files-dir cache or downloaded from [MODEL_URL].
      */
@@ -144,6 +151,13 @@ class ReciteQuranModule(reactContext: ReactApplicationContext) :
     fun initialize(modelPath: String?, promise: Promise) {
         asrThread.execute {
             if (engine != null) {
+                try {
+                    engine?.resetBuffer()
+                } catch (error: Throwable) {
+                    // The engine itself is up; a failed re-base must not fail the whole
+                    // session, but it is logged because the stale stream degrades tracking.
+                    Log.e(TAG, "warm re-initialize resetBuffer() failed", error)
+                }
                 promise.resolve(okResult())
                 return@execute
             }
